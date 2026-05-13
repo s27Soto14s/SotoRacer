@@ -121,10 +121,11 @@ export default function App() {
   }, []);
 
   const saveHighScore = (score: number) => {
+    const finalScore = Math.floor(score);
     const currentHigh = parseInt(localStorage.getItem('sotoracer_highscore') || '0', 10);
-    if (score > currentHigh) {
-      localStorage.setItem('sotoracer_highscore', score.toString());
-      setHighScore(score);
+    if (finalScore > currentHigh) {
+      localStorage.setItem('sotoracer_highscore', finalScore.toString());
+      setHighScore(finalScore);
     }
   };
 
@@ -324,21 +325,25 @@ export default function App() {
     player.vx *= FRICTION;
     player.x += player.vx;
 
-    // Constraints
-    if (player.x < g.roadLeft) {
+    // Constraints & Edge Penalties
+    if (player.x <= g.roadLeft) {
       player.x = g.roadLeft;
       player.vx = 0;
-      if (player.speed > 2) {
-         createExplosion(player.x, player.y, PLAYER_COLOR);
-         player.isExploded = true;
+      // Penalize points and speed
+      player.score = Math.max(player.score - 2, 0); // Approx -120 pts/sec
+      player.speed *= 0.96; 
+      if (player.speed > 3) {
+         createExplosion(player.x, player.y + player.height/2, '#444');
       }
     }
-    if (player.x + player.width > g.roadLeft + g.roadWidth) {
+    if (player.x + player.width >= g.roadLeft + g.roadWidth) {
       player.x = g.roadLeft + g.roadWidth - player.width;
       player.vx = 0;
-      if (player.speed > 2) {
-        createExplosion(player.x + player.width, player.y, PLAYER_COLOR);
-        player.isExploded = true;
+      // Penalize points and speed
+      player.score = Math.max(player.score - 2, 0); 
+      player.speed *= 0.96;
+      if (player.speed > 3) {
+        createExplosion(player.x + player.width, player.y + player.height/2, '#444');
       }
     }
 
@@ -614,16 +619,19 @@ export default function App() {
 
     // --- HUD ---
     const drawHUD = () => {
+        const paddedScore = Math.floor(player.score).toString().padStart(8, '0');
+        const paddedHigh = Math.floor(highScore).toString().padStart(8, '0');
+
         // Score & High Score
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 20px monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(`SCORE: ${Math.floor(player.score)}`, 20, canvasHeight - 30);
+        ctx.fillText(`SCORE: ${paddedScore}`, 20, canvasHeight - 30);
         
         ctx.textAlign = 'right';
         ctx.font = 'bold 14px monospace';
         ctx.fillStyle = '#666';
-        ctx.fillText(`HIGH: ${Math.floor(highScore)}`, canvasWidth - 20, canvasHeight - 30);
+        ctx.fillText(`HIGH: ${paddedHigh}`, canvasWidth - 20, canvasHeight - 30);
 
         // Speed
         ctx.fillStyle = '#fff';
@@ -776,7 +784,7 @@ export default function App() {
           {highScore > 0 && (
             <div className="mb-6 px-4 py-1 bg-white/5 rounded-full border border-white/10">
                <span className="text-gray-400 text-xs">BEST: </span>
-               <span className="text-cyan-400 font-bold">{highScore}</span>
+               <span className="text-cyan-400 font-bold">{Math.floor(highScore).toString().padStart(8, '0')}</span>
             </div>
           )}
 
@@ -817,11 +825,11 @@ export default function App() {
             <div className="flex gap-8 my-6 text-center">
                 <div>
                     <p className="text-gray-400 text-xs uppercase">Score</p>
-                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score)}</p>
+                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
                 </div>
                 <div>
                     <p className="text-gray-400 text-xs uppercase">Best</p>
-                    <p className="text-3xl font-bold text-cyan-400">{highScore}</p>
+                    <p className="text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
                 </div>
             </div>
             <p className="text-gray-400 mb-8 text-sm">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
@@ -845,11 +853,11 @@ export default function App() {
             <div className="flex gap-8 my-6 text-center">
                 <div>
                     <p className="text-gray-400 text-xs uppercase">Final Score</p>
-                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score)}</p>
+                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
                 </div>
                 <div>
                     <p className="text-gray-400 text-xs uppercase">High Score</p>
-                    <p className="text-3xl font-bold text-cyan-400">{highScore}</p>
+                    <p className="text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
                 </div>
             </div>
 
