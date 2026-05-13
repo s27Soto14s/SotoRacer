@@ -19,9 +19,9 @@ const FRICTION = 0.95;
 const ACCELERATION = 0.15;
 const MAX_SPEED_LOW = 5;
 const MAX_SPEED_HIGH = 12;
-const FUEL_DRIP_RATE = 0.05;
+const FUEL_DRIP_RATE_BASE = 0.04;
 const FUEL_COLLECT_BOOST = 25;
-const STAGE_LENGTH = 10000;
+const STAGE_LENGTH = 70000; // ~90-120 seconds
 
 enum GameState {
   START,
@@ -77,7 +77,8 @@ export default function App() {
       distance: 0,
       skidding: 0, // 0: no, -1: left, 1: right
       skidCorrectionNeeded: 0,
-      isExploded: false
+      isExploded: false,
+      outOfFuel: false
     },
     enemies: [] as GameObject[],
     particles: [] as Particle[],
@@ -85,12 +86,14 @@ export default function App() {
     keys: {} as Record<string, boolean>,
     lastEnemyTime: 0,
     lastFuelTime: 0,
+    lastForcedFuelTime: 0,
     canvasWidth: 0,
     canvasHeight: 0,
     roadLeft: 0,
     roadWidth: 0,
     laneWidth: 0,
-    startTime: 0
+    startTime: 0,
+    playTime: 0
   });
 
   const initGame = () => {
@@ -107,24 +110,31 @@ export default function App() {
     player.distance = 0;
     player.skidding = 0;
     player.isExploded = false;
+    player.outOfFuel = false;
     gameRef.current.enemies = [];
     gameRef.current.particles = [];
     gameRef.current.roadOffset = 0;
     gameRef.current.lastEnemyTime = 0;
     gameRef.current.lastFuelTime = 0;
+    gameRef.current.lastForcedFuelTime = 0;
     gameRef.current.startTime = Date.now();
+    gameRef.current.playTime = 0;
   };
 
-  const spawnEnemy = () => {
-    const { roadLeft, roadWidth, laneWidth } = gameRef.current;
-    const lane = Math.floor(Math.random() * LANE_COUNT);
+  const spawnEnemy = (laneSelection?: number) => {
+    const g = gameRef.current;
+    const { roadLeft, laneWidth } = g;
+    const lane = laneSelection ?? Math.floor(Math.random() * LANE_COUNT);
     const typeRoll = Math.random();
     
     let type: GameObject['type'] = 'car';
     let width = 30;
     let height = 50;
     let color = ENEMY_COLORS[Math.floor(Math.random() * ENEMY_COLORS.length)];
-    let speed = 2 + Math.random() * 3;
+    
+    // Difficulty ramp: increase base enemy speed over time
+    const difficultyScale = Math.min(g.playTime / 60000, 1.5); // Max 1.5 extra speed after 60s
+    let speed = (2 + Math.random() * 3) + difficultyScale;
 
     if (typeRoll > 0.85) {
       type = 'truck';
@@ -152,20 +162,32 @@ export default function App() {
   };
 
   const spawnFuel = () => {
-    const { roadLeft, roadWidth, laneWidth } = gameRef.current;
-    const lane = Math.floor(Math.random() * LANE_COUNT);
+    const g = gameRef.current;
+    const { roadLeft, laneWidth, enemies } = g;
+    
+    // Prefer sides or clear lanes
+    let lane = Math.random() > 0.6 ? (Math.random() > 0.5 ? 0 : 3) : Math.floor(Math.random() * LANE_COUNT);
+    
+    // Basic collision avoidance with other spawns
+    const hasOverlap = enemies.some(e => e.lane === lane && e.y < 0);
+    if (hasOverlap) {
+        // Try to find a free lane
+        const freeLanes = [0, 1, 2, 3].filter(l => !enemies.some(e => e.lane === l && e.y < 0));
+        if (freeLanes.length > 0) lane = freeLanes[Math.floor(Math.random() * freeLanes.length)];
+    }
+
     const width = 25;
     const height = 25;
     const x = roadLeft + lane * laneWidth + (laneWidth - width) / 2;
 
-    gameRef.current.enemies.push({
+    g.enemies.push({
       x,
-      y: -100,
+      y: -200,
       width,
       height,
       type: 'fuel',
       color: FUEL_COLOR,
-      speed: 1,
+      speed: 0.5, // Move slower than other cars
       lane
     });
   };
@@ -189,6 +211,8 @@ export default function App() {
     const g = gameRef.current;
     const { player, keys } = g;
 
+    g.playTime += dt;
+
     if (player.isExploded) {
       player.speed *= 0.95;
       if (player.speed < 0.1) {
@@ -201,17 +225,31 @@ export default function App() {
         p.life -= 0.02;
       });
       g.particles = g.particles.filter(p => p.life > 0);
+      
+      // Enemies still move
+      g.enemies.forEach(e => {
+        e.y += (player.speed - e.speed);
+      });
       return;
     }
 
     // --- Input & Physics ---
-    if (keys['ArrowUp'] || keys['w']) {
-      const max = player.gear === Gear.HIGH ? MAX_SPEED_HIGH : MAX_SPEED_LOW;
-      player.speed = Math.min(player.speed + ACCELERATION, max);
-    } else if (keys['ArrowDown'] || keys['s']) {
-      player.speed = Math.max(player.speed - ACCELERATION * 2, 0);
+    if (player.fuel > 0) {
+      if (keys['ArrowUp'] || keys['w']) {
+        const max = player.gear === Gear.HIGH ? MAX_SPEED_HIGH : MAX_SPEED_LOW;
+        player.speed = Math.min(player.speed + ACCELERATION, max);
+      } else if (keys['ArrowDown'] || keys['s']) {
+        player.speed = Math.max(player.speed - ACCELERATION * 2, 0);
+      } else {
+        player.speed = Math.max(player.speed - ACCELERATION * 0.5, 0);
+      }
     } else {
-      player.speed = Math.max(player.speed - ACCELERATION * 0.5, 0);
+      // Out of fuel logic: gradual deceleration
+      player.outOfFuel = true;
+      player.speed = Math.max(player.speed * 0.985, 0);
+      if (player.speed < 0.05) {
+        setGameState(GameState.GAMEOVER);
+      }
     }
 
     // Lateral movement
@@ -259,16 +297,11 @@ export default function App() {
 
     // Distance & Fuel
     player.distance += player.speed;
-    player.fuel -= FUEL_DRIP_RATE * (player.speed / 5 + 1);
     
-    if (player.fuel <= 0) {
-      player.fuel = 0;
-      player.speed *= 0.98;
-      if (player.speed < 0.1) {
-        setGameState(GameState.GAMEOVER);
-      }
-    }
-
+    // Dynamic Fuel: speed based consumption + baseline
+    const consumption = FUEL_DRIP_RATE_BASE * (player.speed / 8 + 0.2);
+    player.fuel = Math.max(player.fuel - consumption, 0);
+    
     if (player.distance >= STAGE_LENGTH) {
       setFinalDistance(player.distance);
       setGameState(GameState.FINISHED);
@@ -293,15 +326,26 @@ export default function App() {
         }
     }
 
-    // --- Enemies ---
+    // --- Enemies & Fuel Spawning ---
     const currentTime = Date.now();
-    if (currentTime - g.lastEnemyTime > 2000 / (1 + player.distance / 2000)) {
+    // Base enemy spawn
+    if (currentTime - g.lastEnemyTime > 1800 / (1 + player.distance / 10000)) {
       spawnEnemy();
       g.lastEnemyTime = currentTime;
     }
-    if (currentTime - g.lastFuelTime > 8000) {
+    
+    // Normal Fuel spawn (increase frequency)
+    if (currentTime - g.lastFuelTime > 6000) {
       spawnFuel();
       g.lastFuelTime = currentTime;
+    }
+
+    // Survival Insurance: if fuel < 15%, force spawn fuel within 3 seconds
+    if (player.fuel < 15 && player.fuel > 0 && !player.isExploded) {
+        if (currentTime - g.lastForcedFuelTime > 3000) {
+            spawnFuel();
+            g.lastForcedFuelTime = currentTime;
+        }
     }
 
     g.enemies.forEach(e => {
@@ -502,7 +546,10 @@ export default function App() {
         const barX = 20;
         const barY = 30;
         
-        ctx.fillStyle = '#333';
+        const isFuelLow = player.fuel < 20;
+        const blink = isFuelLow && Math.floor(Date.now() / 250) % 2 === 0;
+
+        ctx.fillStyle = blink ? '#ef4444' : '#333';
         ctx.fillRect(barX, barY, barW, barH);
         
         const fuelGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
@@ -510,16 +557,16 @@ export default function App() {
         fuelGrad.addColorStop(0.5, '#fbbf24');
         fuelGrad.addColorStop(1, '#10b981');
         
-        ctx.fillStyle = fuelGrad;
+        ctx.fillStyle = blink ? '#fff' : fuelGrad;
         ctx.fillRect(barX, barY, (player.fuel / 100) * barW, barH);
         
-        ctx.strokeStyle = '#fff';
+        ctx.strokeStyle = isFuelLow ? '#ef4444' : '#fff';
         ctx.lineWidth = 1;
         ctx.strokeRect(barX, barY, barW, barH);
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = isFuelLow ? '#ef4444' : '#fff';
         ctx.font = 'bold 12px monospace';
         ctx.textAlign = 'left';
-        ctx.fillText('FUEL', barX, barY - 5);
+        ctx.fillText(isFuelLow ? 'LOW FUEL!' : 'FUEL', barX, barY - 5);
 
         // Progress
         const progW = 10;
@@ -654,13 +701,19 @@ export default function App() {
 
       {gameState === GameState.GAMEOVER && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-950/40 backdrop-blur-md">
-          <h2 className="text-8xl font-black text-red-500 mb-2 drop-shadow-2xl">CRASHED</h2>
-          <p className="text-white mb-8">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
+          <h2 className="text-8xl font-black text-red-500 mb-2 drop-shadow-2xl">
+            {gameRef.current.player.outOfFuel ? 'OUT OF FUEL' : 'GAME OVER'}
+          </h2>
+          <p className="text-white mb-2 text-xl">
+             {gameRef.current.player.outOfFuel ? 'Your engine stalled...' : 'You crashed!'}
+          </p>
+          <p className="text-white mb-8 border-t border-white/20 pt-4">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
           <button 
             onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
-            className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-colors"
+            id="restart-button"
+            className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95"
           >
-            RESTART [R]
+            RETRY [R]
           </button>
         </div>
       )}
