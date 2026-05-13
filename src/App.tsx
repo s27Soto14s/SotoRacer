@@ -101,6 +101,8 @@ export default function App() {
     floatingTexts: [] as FloatingText[],
     roadOffset: 0,
     keys: {} as Record<string, boolean>,
+    touch: { left: false, right: false, gas: false } as Record<string, boolean>,
+    isMobile: false,
     lastEnemyTime: 0,
     lastFuelTime: 0,
     lastForcedFuelTime: 0,
@@ -282,11 +284,14 @@ export default function App() {
     }
 
     // --- Input & Physics ---
+    const isAccelerating = keys['ArrowUp'] || keys['w'] || g.touch.gas || (g.isMobile && gameState === GameState.PLAYING);
+    const isBraking = keys['ArrowDown'] || keys['s'];
+
     if (player.fuel > 0) {
-      if (keys['ArrowUp'] || keys['w']) {
+      if (isAccelerating) {
         const max = player.gear === Gear.HIGH ? MAX_SPEED_HIGH : MAX_SPEED_LOW;
         player.speed = Math.min(player.speed + ACCELERATION, max);
-      } else if (keys['ArrowDown'] || keys['s']) {
+      } else if (isBraking) {
         player.speed = Math.max(player.speed - ACCELERATION * 2, 0);
       } else {
         player.speed = Math.max(player.speed - ACCELERATION * 0.5, 0);
@@ -314,10 +319,10 @@ export default function App() {
         }
       }
     } else {
-      if (keys['ArrowLeft'] || keys['a']) {
+      if (keys['ArrowLeft'] || keys['a'] || g.touch.left) {
         player.vx -= 0.8;
       }
-      if (keys['ArrowRight'] || keys['d']) {
+      if (keys['ArrowRight'] || keys['d'] || g.touch.right) {
         player.vx += 0.8;
       }
     }
@@ -624,30 +629,30 @@ export default function App() {
 
         // Score & High Score
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 20px monospace';
+        ctx.font = `bold ${g.isMobile ? '24px' : '20px'} monospace`;
         ctx.textAlign = 'left';
         ctx.fillText(`SCORE: ${paddedScore}`, 20, canvasHeight - 30);
         
         ctx.textAlign = 'right';
-        ctx.font = 'bold 14px monospace';
+        ctx.font = `bold ${g.isMobile ? '16px' : '14px'} monospace`;
         ctx.fillStyle = '#666';
         ctx.fillText(`HIGH: ${paddedHigh}`, canvasWidth - 20, canvasHeight - 30);
 
         // Speed
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 24px monospace';
+        ctx.font = `bold ${g.isMobile ? '32px' : '24px'} monospace`;
         ctx.textAlign = 'right';
         const speedKmh = Math.floor(player.speed * 20);
         ctx.fillText(`${speedKmh} KM/H`, canvasWidth - 20, 40);
         
         // Gear
-        ctx.font = 'bold 16px monospace';
+        ctx.font = `bold ${g.isMobile ? '18px' : '16px'} monospace`;
         ctx.fillStyle = player.gear === Gear.HIGH ? LANE_LINE_COLOR : '#aaa';
-        ctx.fillText(player.gear === Gear.HIGH ? 'HIGH' : 'LOW', canvasWidth - 20, 65);
+        ctx.fillText(player.gear === Gear.HIGH ? 'HIGH' : 'LOW', canvasWidth - 20, g.isMobile ? 75 : 65);
 
         // Fuel Bar
-        const barW = 200;
-        const barH = 15;
+        const barW = g.isMobile ? canvasWidth * 0.4 : 200;
+        const barH = g.isMobile ? 20 : 15;
         const barX = 20;
         const barY = 30;
         
@@ -669,7 +674,7 @@ export default function App() {
         ctx.lineWidth = 1;
         ctx.strokeRect(barX, barY, barW, barH);
         ctx.fillStyle = isFuelLow ? '#ef4444' : '#fff';
-        ctx.font = 'bold 12px monospace';
+        ctx.font = `bold ${g.isMobile ? '14px' : '12px'} monospace`;
         ctx.textAlign = 'left';
         ctx.fillText(isFuelLow ? 'LOW FUEL!' : 'FUEL', barX, barY - 5);
 
@@ -744,6 +749,46 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
+    const handleTouch = (e: TouchEvent) => {
+      e.preventDefault();
+      gameRef.current.isMobile = true;
+      const { canvasWidth } = gameRef.current;
+      
+      // Reset touch states
+      gameRef.current.touch.left = false;
+      gameRef.current.touch.right = false;
+      gameRef.current.touch.gas = false;
+
+      if (e.type === 'touchend' && e.touches.length === 0) return;
+
+      for (let i = 0; i < e.touches.length; i++) {
+        const touchX = e.touches[i].clientX;
+        if (touchX < canvasWidth * 0.4) {
+          gameRef.current.touch.left = true;
+        } else if (touchX > canvasWidth * 0.6) {
+          gameRef.current.touch.right = true;
+        } else {
+          gameRef.current.touch.gas = true;
+        }
+      }
+
+      // Handle game state transitions on touch
+      if (gameState === GameState.START) {
+        initGame();
+        setGameState(GameState.PLAYING);
+      } else if (gameState === GameState.GAMEOVER || gameState === GameState.FINISHED) {
+        // Simple delay to prevent accidental restart
+        if (Date.now() - gameRef.current.startTime > 1000) {
+           initGame();
+           setGameState(GameState.PLAYING);
+        }
+      }
+    };
+
+    canvas.addEventListener('touchstart', handleTouch, { passive: false });
+    canvas.addEventListener('touchmove', handleTouch, { passive: false });
+    canvas.addEventListener('touchend', handleTouch, { passive: false });
+
     let animationFrame: number;
     const loop = () => {
       update(16); // Assuming 60fps for simplicity, or calc actual dt
@@ -758,6 +803,9 @@ export default function App() {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      canvas.removeEventListener('touchstart', handleTouch);
+      canvas.removeEventListener('touchmove', handleTouch);
+      canvas.removeEventListener('touchend', handleTouch);
     };
   }, [gameState]);
 
@@ -781,6 +829,16 @@ export default function App() {
           </h1>
           <p className="text-gray-500 mb-4 uppercase tracking-[0.3em] text-xs">High Speed Endurance</p>
           
+          <div className="md:hidden flex flex-col items-center mb-8">
+             <button 
+                onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
+                className="bg-cyan-500 text-black font-bold px-12 py-4 rounded-full text-xl shadow-lg shadow-cyan-500/20 active:scale-95 transition-all"
+             >
+                START ENGINE
+             </button>
+             <p className="text-[10px] text-gray-500 mt-2 uppercase">Tap sides to steer • Auto-Gas enabled</p>
+          </div>
+
           {highScore > 0 && (
             <div className="mb-6 px-4 py-1 bg-white/5 rounded-full border border-white/10">
                <span className="text-gray-400 text-xs">BEST: </span>
@@ -788,8 +846,8 @@ export default function App() {
             </div>
           )}
 
-          <p className="text-cyan-400 animate-pulse mb-12">PRESS [SPACE] TO IGNITE</p>
-          <div className="grid grid-cols-2 gap-8 text-sm text-gray-400">
+          <p className="text-cyan-400 animate-pulse mb-12 hidden md:block">PRESS [SPACE] TO IGNITE</p>
+          <div className="grid grid-cols-2 gap-8 text-sm text-gray-400 hidden md:grid">
             <div className="flex items-center gap-2">
               <span className="bg-gray-800 px-2 py-1 rounded border border-gray-700 font-bold text-white">W / ↑</span>
               <span>Accelerate</span>
@@ -814,29 +872,29 @@ export default function App() {
       )}
 
       {gameState === GameState.GAMEOVER && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-950/40 backdrop-blur-md">
-          <h2 className="text-8xl font-black text-red-500 mb-2 drop-shadow-2xl">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-950/40 backdrop-blur-md px-4">
+          <h2 className="text-6xl md:text-8xl font-black text-red-500 mb-2 drop-shadow-2xl text-center">
             {gameRef.current.player.outOfFuel ? 'OUT OF FUEL' : 'GAME OVER'}
           </h2>
-          <div className="bg-black/60 p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center">
-            <p className="text-white mb-2 text-xl">
+          <div className="bg-black/60 p-6 md:p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center w-full max-w-sm">
+            <p className="text-white mb-2 text-lg md:text-xl text-center">
                {gameRef.current.player.outOfFuel ? 'Your engine stalled...' : 'You crashed!'}
             </p>
-            <div className="flex gap-8 my-6 text-center">
+            <div className="flex gap-6 md:gap-8 my-6 text-center">
                 <div>
-                    <p className="text-gray-400 text-xs uppercase">Score</p>
-                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
+                    <p className="text-gray-400 text-[10px] md:text-xs uppercase">Score</p>
+                    <p className="text-2xl md:text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
                 </div>
                 <div>
-                    <p className="text-gray-400 text-xs uppercase">Best</p>
-                    <p className="text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
+                    <p className="text-gray-400 text-[10px] md:text-xs uppercase">Best</p>
+                    <p className="text-2xl md:text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
                 </div>
             </div>
             <p className="text-gray-400 mb-8 text-sm">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
             <button 
                 onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
                 id="restart-button"
-                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl"
+                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl w-full"
             >
                 RETRY [R]
             </button>
@@ -845,26 +903,26 @@ export default function App() {
       )}
 
       {gameState === GameState.FINISHED && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-cyan-950/40 backdrop-blur-md">
-          <h2 className="text-8xl font-black text-cyan-400 mb-2 drop-shadow-2xl">VICTORY</h2>
-          <div className="bg-black/60 p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center">
-            <p className="text-white mb-2 text-2xl font-bold italic">STAGE COMPLETE</p>
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-cyan-950/40 backdrop-blur-md px-4">
+          <h2 className="text-6xl md:text-8xl font-black text-cyan-400 mb-2 drop-shadow-2xl text-center">VICTORY</h2>
+          <div className="bg-black/60 p-6 md:p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center w-full max-w-sm">
+            <p className="text-white mb-2 text-xl md:text-2xl font-bold italic">STAGE COMPLETE</p>
             
-            <div className="flex gap-8 my-6 text-center">
+            <div className="flex gap-6 md:gap-8 my-6 text-center">
                 <div>
-                    <p className="text-gray-400 text-xs uppercase">Final Score</p>
-                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
+                    <p className="text-gray-400 text-[10px] md:text-xs uppercase">Final Score</p>
+                    <p className="text-2xl md:text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score).toString().padStart(8, '0')}</p>
                 </div>
                 <div>
-                    <p className="text-gray-400 text-xs uppercase">High Score</p>
-                    <p className="text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
+                    <p className="text-gray-400 text-[10px] md:text-xs uppercase">High Score</p>
+                    <p className="text-2xl md:text-3xl font-bold text-cyan-400">{Math.floor(highScore).toString().padStart(8, '0')}</p>
                 </div>
             </div>
 
-            <p className="text-gray-300 mb-8">Final Sprint Distance: {Math.floor(finalDistance)}m</p>
+            <p className="text-gray-300 mb-8 text-sm">Final Sprint Distance: {Math.floor(finalDistance)}m</p>
             <button 
                 onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
-                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl"
+                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl w-full"
             >
                 PLAY AGAIN [R]
             </button>
