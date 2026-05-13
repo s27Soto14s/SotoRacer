@@ -23,6 +23,10 @@ const FUEL_DRIP_RATE_BASE = 0.04;
 const FUEL_COLLECT_BOOST = 25;
 const STAGE_LENGTH = 70000; // ~90-120 seconds
 
+const SCORE_PER_METER = 1;
+const FUEL_BONUS_POINTS = 500;
+const OVERTAKE_BONUS_POINTS = 200;
+
 enum GameState {
   START,
   PLAYING,
@@ -36,6 +40,7 @@ enum Gear {
 }
 
 interface GameObject {
+  id: string;
   x: number;
   y: number;
   width: number;
@@ -45,6 +50,15 @@ interface GameObject {
   color: string;
   lane: number;
   targetLane?: number;
+  overtaken?: boolean;
+}
+
+interface FloatingText {
+  x: number;
+  y: number;
+  text: string;
+  life: number;
+  color: string;
 }
 
 interface Particle {
@@ -60,7 +74,8 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [gameState, setGameState] = useState<GameState>(GameState.START);
-  const [score, setScore] = useState(0);
+  const [highScore, setHighScore] = useState(0);
+  const [currentScore, setCurrentScore] = useState(0);
   const [finalDistance, setFinalDistance] = useState(0);
 
   // Game instance variables (using ref to avoid re-renders)
@@ -75,6 +90,7 @@ export default function App() {
       fuel: 100,
       gear: Gear.LOW,
       distance: 0,
+      score: 0,
       skidding: 0, // 0: no, -1: left, 1: right
       skidCorrectionNeeded: 0,
       isExploded: false,
@@ -82,6 +98,7 @@ export default function App() {
     },
     enemies: [] as GameObject[],
     particles: [] as Particle[],
+    floatingTexts: [] as FloatingText[],
     roadOffset: 0,
     keys: {} as Record<string, boolean>,
     lastEnemyTime: 0,
@@ -96,6 +113,21 @@ export default function App() {
     playTime: 0
   });
 
+  useEffect(() => {
+    const savedHighScore = localStorage.getItem('sotoracer_highscore');
+    if (savedHighScore) {
+      setHighScore(parseInt(savedHighScore, 10));
+    }
+  }, []);
+
+  const saveHighScore = (score: number) => {
+    const currentHigh = parseInt(localStorage.getItem('sotoracer_highscore') || '0', 10);
+    if (score > currentHigh) {
+      localStorage.setItem('sotoracer_highscore', score.toString());
+      setHighScore(score);
+    }
+  };
+
   const initGame = () => {
     const { player } = gameRef.current;
     const w = gameRef.current.canvasWidth;
@@ -108,17 +140,20 @@ export default function App() {
     player.fuel = 100;
     player.gear = Gear.LOW;
     player.distance = 0;
+    player.score = 0;
     player.skidding = 0;
     player.isExploded = false;
     player.outOfFuel = false;
     gameRef.current.enemies = [];
     gameRef.current.particles = [];
+    gameRef.current.floatingTexts = [];
     gameRef.current.roadOffset = 0;
     gameRef.current.lastEnemyTime = 0;
     gameRef.current.lastFuelTime = 0;
     gameRef.current.lastForcedFuelTime = 0;
     gameRef.current.startTime = Date.now();
     gameRef.current.playTime = 0;
+    setCurrentScore(0);
   };
 
   const spawnEnemy = (laneSelection?: number) => {
@@ -149,7 +184,8 @@ export default function App() {
 
     const x = roadLeft + lane * laneWidth + (laneWidth - width) / 2;
     
-    gameRef.current.enemies.push({
+    g.enemies.push({
+      id: Math.random().toString(36).substr(2, 9),
       x,
       y: -200,
       width,
@@ -181,6 +217,7 @@ export default function App() {
     const x = roadLeft + lane * laneWidth + (laneWidth - width) / 2;
 
     g.enemies.push({
+      id: Math.random().toString(36).substr(2, 9),
       x,
       y: -200,
       width,
@@ -189,6 +226,16 @@ export default function App() {
       color: FUEL_COLOR,
       speed: 0.5, // Move slower than other cars
       lane
+    });
+  };
+
+  const addFloatingText = (x: number, y: number, text: string, color: string) => {
+    gameRef.current.floatingTexts.push({
+      x,
+      y,
+      text,
+      life: 1.0,
+      color
     });
   };
 
@@ -296,7 +343,18 @@ export default function App() {
     }
 
     // Distance & Fuel
+    const prevDistance = player.distance;
     player.distance += player.speed;
+    
+    // Scoring by distance with speed multiplier
+    const distanceMeter = (player.distance - prevDistance) / 10;
+    const speedMult = 1 + (player.speed / MAX_SPEED_HIGH);
+    player.score += distanceMeter * SCORE_PER_METER * speedMult;
+
+    // Sync state for UI
+    if (Math.floor(player.score) !== currentScore) {
+       setCurrentScore(Math.floor(player.score));
+    }
     
     // Dynamic Fuel: speed based consumption + baseline
     const consumption = FUEL_DRIP_RATE_BASE * (player.speed / 8 + 0.2);
@@ -376,7 +434,9 @@ export default function App() {
         ) {
             if (e.type === 'fuel') {
                 player.fuel = Math.min(player.fuel + FUEL_COLLECT_BOOST, 100);
-                e.y = 2000; // Remove
+                player.score += FUEL_BONUS_POINTS;
+                addFloatingText(e.x, e.y, `+${FUEL_BONUS_POINTS}`, FUEL_COLOR);
+                e.y = 3000; // Remove
             } else {
                 // Check if it's a side collision or front
                 const overlapX = Math.min(player.x + player.width, e.x + e.width) - Math.max(player.x, e.x);
@@ -392,20 +452,37 @@ export default function App() {
                     // Head on crash
                     createExplosion(player.x + player.width/2, player.y + player.height/2, PLAYER_COLOR);
                     player.isExploded = true;
+                    saveHighScore(player.score);
                 }
+            }
+        }
+
+        // Overtake detection
+        if (!e.overtaken && e.type !== 'fuel' && e.y > player.y + player.height) {
+            e.overtaken = true;
+            // Only reward if passing at reasonable speed
+            if (player.speed > 3) {
+                player.score += OVERTAKE_BONUS_POINTS;
+                addFloatingText(e.x, e.y, `+${OVERTAKE_BONUS_POINTS}`, '#fff');
             }
         }
     });
 
     g.enemies = g.enemies.filter(e => e.y < g.canvasHeight + 200 && e.y > -500);
 
-    // Particles
+    // Particles & Floating Text
     g.particles.forEach(p => {
         p.x += p.vx;
         p.y += p.vy;
         p.life -= 0.02;
     });
     g.particles = g.particles.filter(p => p.life > 0);
+
+    g.floatingTexts.forEach(t => {
+        t.y -= 1; // Float up
+        t.life -= 0.02;
+    });
+    g.floatingTexts = g.floatingTexts.filter(t => t.life > 0);
   };
 
   const draw = (ctx: CanvasRenderingContext2D) => {
@@ -524,10 +601,30 @@ export default function App() {
         ctx.arc(p.x, p.y, 2 + Math.random() * 3, 0, Math.PI * 2);
         ctx.fill();
     });
+
+    // Floating Texts
+    g.floatingTexts.forEach(t => {
+        ctx.fillStyle = t.color;
+        ctx.globalAlpha = t.life;
+        ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(t.text, t.x, t.y);
+    });
     ctx.globalAlpha = 1.0;
 
     // --- HUD ---
     const drawHUD = () => {
+        // Score & High Score
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 20px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(`SCORE: ${Math.floor(player.score)}`, 20, canvasHeight - 30);
+        
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillStyle = '#666';
+        ctx.fillText(`HIGH: ${Math.floor(highScore)}`, canvasWidth - 20, canvasHeight - 30);
+
         // Speed
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 24px monospace';
@@ -671,9 +768,18 @@ export default function App() {
       {/* Overlays */}
       {gameState === GameState.START && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
-          <h1 className="text-6xl font-black mb-4 tracking-tighter text-transparent bg-clip-text bg-gradient-to-b from-white to-gray-500">
+          <h1 className="text-6xl font-black mb-1 tracking-tighter text-transparent bg-clip-text bg-gradient-to-b from-white to-gray-500">
             SOTO RACER
           </h1>
+          <p className="text-gray-500 mb-4 uppercase tracking-[0.3em] text-xs">High Speed Endurance</p>
+          
+          {highScore > 0 && (
+            <div className="mb-6 px-4 py-1 bg-white/5 rounded-full border border-white/10">
+               <span className="text-gray-400 text-xs">BEST: </span>
+               <span className="text-cyan-400 font-bold">{highScore}</span>
+            </div>
+          )}
+
           <p className="text-cyan-400 animate-pulse mb-12">PRESS [SPACE] TO IGNITE</p>
           <div className="grid grid-cols-2 gap-8 text-sm text-gray-400">
             <div className="flex items-center gap-2">
@@ -704,31 +810,57 @@ export default function App() {
           <h2 className="text-8xl font-black text-red-500 mb-2 drop-shadow-2xl">
             {gameRef.current.player.outOfFuel ? 'OUT OF FUEL' : 'GAME OVER'}
           </h2>
-          <p className="text-white mb-2 text-xl">
-             {gameRef.current.player.outOfFuel ? 'Your engine stalled...' : 'You crashed!'}
-          </p>
-          <p className="text-white mb-8 border-t border-white/20 pt-4">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
-          <button 
-            onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
-            id="restart-button"
-            className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95"
-          >
-            RETRY [R]
-          </button>
+          <div className="bg-black/60 p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center">
+            <p className="text-white mb-2 text-xl">
+               {gameRef.current.player.outOfFuel ? 'Your engine stalled...' : 'You crashed!'}
+            </p>
+            <div className="flex gap-8 my-6 text-center">
+                <div>
+                    <p className="text-gray-400 text-xs uppercase">Score</p>
+                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score)}</p>
+                </div>
+                <div>
+                    <p className="text-gray-400 text-xs uppercase">Best</p>
+                    <p className="text-3xl font-bold text-cyan-400">{highScore}</p>
+                </div>
+            </div>
+            <p className="text-gray-400 mb-8 text-sm">DISTANCE: {Math.floor(gameRef.current.player.distance)}m</p>
+            <button 
+                onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
+                id="restart-button"
+                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl"
+            >
+                RETRY [R]
+            </button>
+          </div>
         </div>
       )}
 
       {gameState === GameState.FINISHED && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-cyan-950/40 backdrop-blur-md">
           <h2 className="text-8xl font-black text-cyan-400 mb-2 drop-shadow-2xl">VICTORY</h2>
-          <p className="text-white mb-2 text-2xl">STAGE COMPLETE</p>
-          <p className="text-gray-300 mb-8">Final Sprint Distance: {Math.floor(finalDistance)}m</p>
-          <button 
-            onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
-            className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-colors"
-          >
-            PLAY AGAIN [R]
-          </button>
+          <div className="bg-black/60 p-8 rounded-2xl border border-white/10 backdrop-blur flex flex-col items-center">
+            <p className="text-white mb-2 text-2xl font-bold italic">STAGE COMPLETE</p>
+            
+            <div className="flex gap-8 my-6 text-center">
+                <div>
+                    <p className="text-gray-400 text-xs uppercase">Final Score</p>
+                    <p className="text-3xl font-bold text-white">{Math.floor(gameRef.current.player.score)}</p>
+                </div>
+                <div>
+                    <p className="text-gray-400 text-xs uppercase">High Score</p>
+                    <p className="text-3xl font-bold text-cyan-400">{highScore}</p>
+                </div>
+            </div>
+
+            <p className="text-gray-300 mb-8">Final Sprint Distance: {Math.floor(finalDistance)}m</p>
+            <button 
+                onClick={() => { initGame(); setGameState(GameState.PLAYING); }}
+                className="px-12 py-4 bg-white text-black font-bold rounded-full hover:bg-cyan-400 transition-all active:scale-95 shadow-xl"
+            >
+                PLAY AGAIN [R]
+            </button>
+          </div>
         </div>
       )}
 
